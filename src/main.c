@@ -64,10 +64,25 @@ static char * leer_string(char *prompt) {
     size_t ll=0;
     fputs(prompt, stdout);
     n=getline(&lin, &ll, stdin);
-    if (n<1) {ungetc(' ', stdin); return NULL;}
-    n=sscanf(lin, "%ms", &str);
+    if (n<1) {
+        free(lin);
+        ungetc(' ', stdin);
+        return NULL;
+    }
+    char *ini = lin + strspn(lin, " \t\r\n");
+    size_t len = strcspn(ini, " \t\r\n");
+    if (len == 0) {
+        free(lin);
+        return NULL;
+    }
+    str = malloc(len + 1);
+    if (!str) {
+        free(lin);
+        return NULL;
+    }
+    memcpy(str, ini, len);
+    str[len] = '\0';
     free(lin);
-    if (n!=1) return NULL;
     return str;
 }
 int leer_int(char *prompt) {
@@ -76,7 +91,11 @@ int leer_int(char *prompt) {
     size_t ll=0;
     fputs(prompt, stdout);
     n=getline(&lin, &ll, stdin);
-    if (n<1) {ungetc(' ', stdin); return -1;}
+    if (n<1) {
+        free(lin);
+        ungetc(' ', stdin);
+        return -1;
+    }
     n=sscanf(lin, "%d", &v);
     free(lin);
     if (n!=1) return -1;
@@ -88,13 +107,19 @@ static void user_commands(void) {
     char *host;
     char *fichero;
     int hops;
+    int input_port;
+    int pid;
+    unsigned int ip;
+    unsigned int suc_ip;
+    unsigned int suc_suc_ip;
+    unsigned short port;
+    unsigned short suc_port;
+    unsigned short suc_suc_port;
     while (1) {
         op=leer_string("\nSeleccione operación (línea vacía para terminar; en menús internos para volver a menú principal)\n\tI: obtiene Info de nodo local| P: getPid|S: Sucesor|R:sucesor Remoto|U: sUcesor de sucesor remoto|D: Download|L: Lookup fichero|G: Get fichero (lookup+download)\n");
         if (op==NULL) break;
         switch(op[0]) {
             case 'I':
-		unsigned int ip;
-		unsigned short port;
                 ring_self(&ip, &port);
                 printf("\nIP %s port %d\n", getIPdot(ip), ntohs(port));
                 break;
@@ -102,10 +127,9 @@ static void user_commands(void) {
                 host=leer_string("Introduzca el nombre o la IP del host remoto: ");
                 if (host==NULL) continue;
                 if (getIP(host, &ip) < 0) continue;
-                port=leer_int("Introduzca el puerto del host remoto: ");
-                if (port==-1) continue;
-                int pid;
-                if ((pid=ring_remote_pid(ip, htons(port)))<0)
+                input_port=leer_int("Introduzca el puerto del host remoto: ");
+                if (input_port==-1) continue;
+                if ((pid=ring_remote_pid(ip, htons(input_port)))<0)
                     printf("error en ring_remote_pid\n");
                 else {
                     printf("\nPID %d\n", pid);
@@ -119,11 +143,9 @@ static void user_commands(void) {
                 host=leer_string("Introduzca el nombre o la IP del host remoto: ");
                 if (host==NULL) continue;
                 if (getIP(host, &ip) < 0) continue;
-                port=leer_int("Introduzca el puerto del host remoto: ");
-                if (port==-1) continue;
-		unsigned int suc_ip;
-		unsigned short suc_port;
-                if (ring_remote_successor(ip, htons(port), &suc_ip, &suc_port)<0)
+                input_port=leer_int("Introduzca el puerto del host remoto: ");
+                if (input_port==-1) continue;
+                if (ring_remote_successor(ip, htons(input_port), &suc_ip, &suc_port)<0)
                     printf("error en ring_remote_successor\n");
                 else {
                     printf("\nIP %s port %d\n", getIPdot(suc_ip), ntohs(suc_port));
@@ -133,11 +155,9 @@ static void user_commands(void) {
                 host=leer_string("Introduzca el nombre o la IP del host remoto: ");
                 if (host==NULL) continue;
                 if (getIP(host, &ip) < 0) continue;
-                port=leer_int("Introduzca el puerto del host remoto: ");
-                if (port==-1) continue;
-		unsigned int suc_suc_ip;
-		unsigned short suc_suc_port;
-                if (ring_remote_successor_successor(ip, htons(port), &suc_suc_ip, &suc_suc_port)<0)
+                input_port=leer_int("Introduzca el puerto del host remoto: ");
+                if (input_port==-1) continue;
+                if (ring_remote_successor_successor(ip, htons(input_port), &suc_suc_ip, &suc_suc_port)<0)
                     printf("error en ring_get_suc_suc\n");
                 else {
                     printf("\nIP %s port %d\n", getIPdot(suc_suc_ip), ntohs(suc_suc_port));
@@ -147,11 +167,11 @@ static void user_commands(void) {
                 host=leer_string("Introduzca el nombre o la IP del host remoto: ");
                 if (host==NULL) continue;
                 if (getIP(host, &ip) < 0) continue;
-                port=leer_int("Introduzca el puerto del host remoto: ");
-                if (port==-1) continue;
+                input_port=leer_int("Introduzca el puerto del host remoto: ");
+                if (input_port==-1) continue;
                 fichero=leer_string("Introduzca el nombre del fichero: ");
                 if (fichero==NULL) continue;
-                if (ring_download(ip, htons(port), fichero)<0)
+                if (ring_download(ip, htons(input_port), fichero)<0)
                     printf("error en ring_download\n");
                 break;
             case 'L':
@@ -215,4 +235,3 @@ unsigned int get_host_info(char *hostname, size_t lon, unsigned int *ip) {
     freeaddrinfo(res);
     return 0;
 }
-

@@ -9,10 +9,12 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <sys/uio.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 
 #include "ring.h"
 #include "common.h"
+
 
 // Variables globales
 static unsigned int g_local_ip = 0;
@@ -24,6 +26,7 @@ static char *g_srd_dir = NULL;
 // Interfaz de funciones auxiliares
 static int is_initialized(void);
 static int initialize(void);
+
 
 // inicia el nodo añadiéndolo a la red P2P si ya está creada;
 // los puertos e IPs deben estar en formato de red;
@@ -66,11 +69,31 @@ int ring_self(unsigned int *ip, unsigned short *port) {
     *port = g_local_port;
     return 0;
 }
+
+
 // devuelve el PID del nodo remoto especificado o -1 si error
 int ring_remote_pid(unsigned int remote_ip, unsigned short remote_port) {
     if (!is_initialized()) return -1; // no está inicializada
-    return 0;
+
+    int soc = create_socket_cln(remote_ip, remote_port);
+    if (soc < 0) return -1; // error en conexión
+
+    char op = 'P';
+    if (send(soc, &op, sizeof(char), 0) != sizeof(op)) {    // envía la operación
+        close(soc);
+        return -1;
+    }
+
+    int pid;
+    if (recv(soc, &pid, sizeof(int), MSG_WAITALL) != sizeof(int)) { // recibe el PID
+        close(soc);
+        return -1;
+    }
+    close(soc);
+    return ntohl(pid); // devuelve el PID en formato de host
 }
+
+
 // función local que devuelve la IP y el puerto del nodo sucesor;
 // retorna 0 si OK y -1 si error
 int ring_successor(unsigned int *ip, unsigned short *port) {

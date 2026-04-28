@@ -16,6 +16,25 @@
 
 void *request_handler(void *arg) {
     int soc = (long)arg;
+    char op;
+
+    if (recv(soc, &op, sizeof(char), MSG_WAITALL) != sizeof(char)) {
+        close(soc);
+        return NULL;
+    }
+
+    switch (op) {
+        case 'P':
+            // obtener PID
+            int pid = htonl(getpid());
+            if (send(soc, &pid, sizeof(pid), 0) != sizeof(pid)) {
+                close(soc);
+                return NULL;
+            }
+            break;
+        default:
+            break;
+    }
     close(soc);
     return NULL;
 }

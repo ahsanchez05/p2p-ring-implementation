@@ -54,4 +54,8 @@ dkms.conf
 # debug information files
 *.dwo
 
+#Idea config files
 .idea
+
+#Executable files
+ring
