@@ -14,6 +14,14 @@
 #include "ring.h"
 #include "common.h"
 
+// Variables globales
+static unsigned int g_local_ip = 0;
+static unsigned short g_local_port = 0;
+static int g_srv_sock = -1;
+static char *g_srd_dir = NULL;
+
+
+// Interfaz de funciones auxiliares
 static int is_initialized(void);
 static int initialize(void);
 
@@ -23,12 +31,39 @@ static int initialize(void);
 // retorna 0 si OK y -1 si error
 int ring_init(const char *shrd_dir, unsigned int local_ip, unsigned int remote_ip, unsigned short remote_port, unsigned short *alloc_port) {
     if (initialize()) return -1; // ya está inicializada
+    if (!shrd_dir || !alloc_port) return -1; // parámetros no válidos
+
+    // guarda la IP local y el directorio compartido
+    g_local_ip = local_ip;
+    g_srd_dir = strdup(shrd_dir);
+    if (!g_srd_dir) return -1; // error de memoria
+
+    // crea el socket de servicio y obtiene el puerto asignado
+    g_srv_sock = create_socket_srv(&g_local_port);
+    if (g_srv_sock < 0) {
+        free(g_srd_dir);
+        g_srd_dir = NULL;
+        return -1;
+    }
+
+    *alloc_port = g_local_port; // devuelve el puerto asignado
+
+    if (create_thread(server_thread, (void *)(long)g_srv_sock) != 0) {
+        close(g_srv_sock); g_srv_sock = -1;
+        free(g_srd_dir); g_srd_dir = NULL;
+        return -1;
+    }
     return 0;
 }
+
+
 // función local que devuelve la IP y el puerto del nodo;
 // retorna 0 si OK y -1 si error
 int ring_self(unsigned int *ip, unsigned short *port) {
     if (!is_initialized()) return -1; // no está inicializada
+    if (!ip || !port) return -1;
+    *ip = g_local_ip;
+    *port = g_local_port;
     return 0;
 }
 // devuelve el PID del nodo remoto especificado o -1 si error
