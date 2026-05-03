@@ -17,10 +17,12 @@
 
 
 // Variables globales
-static unsigned int g_local_ip = 0;
-static unsigned short g_local_port = 0;
-static int g_srv_sock = -1;
-static char *g_srd_dir = NULL;
+unsigned int g_local_ip = 0;
+unsigned int g_suc_ip = 0;
+unsigned short g_suc_port = 0;
+unsigned short g_local_port = 0;
+int g_srv_sock = -1;
+char *g_srd_dir = NULL;
 
 
 // Interfaz de funciones auxiliares
@@ -33,6 +35,11 @@ static int initialize(void);
 // debe devolver en el último parámetro el puerto reservado en formato red;
 // retorna 0 si OK y -1 si error
 int ring_init(const char *shrd_dir, unsigned int local_ip, unsigned int remote_ip, unsigned short remote_port, unsigned short *alloc_port) {
+    int soc;
+    char op;
+    // unsigned short suc_port;
+    // unsigned int suc_ip;
+
     if (initialize()) return -1; // ya está inicializada
     if (!shrd_dir || !alloc_port) return -1; // parámetros no válidos
 
@@ -51,9 +58,70 @@ int ring_init(const char *shrd_dir, unsigned int local_ip, unsigned int remote_i
 
     *alloc_port = g_local_port; // devuelve el puerto asignado
 
+    // primer nodo: sucesor es él mismo
+    if (remote_ip == 0 && remote_port == 0) {
+        g_suc_ip = g_local_ip;
+        g_suc_port = g_local_port;
+    } else {
+        // nodo que se une a la red: debe contactar con el nodo remoto para obtener su sucesor y actualizarlo
+        soc = create_socket_cln(remote_ip, remote_port);
+        if (soc < 0) {
+            close(g_srv_sock); g_srv_sock = -1;
+            free(g_srd_dir); g_srd_dir = NULL;
+            return -1; // error en conexión
+        }
+
+        // manda código de alta
+        op = 'A';
+        if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+            close(soc);
+            close(g_srv_sock);
+            g_srv_sock = -1;
+            free(g_srd_dir);
+            g_srd_dir = NULL;
+            return -1;
+        }
+
+        // manda el puerto del nuevo nodo
+        if (send(soc, &g_local_port, sizeof(g_local_port), 0) != sizeof(g_local_port)) {
+            close(soc);
+            close(g_srv_sock);
+            g_srv_sock = -1;
+            free(g_srd_dir);
+            g_srd_dir = NULL;
+            return -1;
+        }
+
+        // recibe el sucesor anterior del nodo de contacto
+        if (recv(soc, &g_suc_ip, sizeof(g_suc_ip), MSG_WAITALL) != sizeof(g_suc_ip)) {
+            close(soc);
+            close(g_srv_sock);
+            g_srv_sock = -1;
+            free(g_srd_dir);
+            g_srd_dir = NULL;
+            return -1;
+        }
+        if (recv(soc, &g_suc_port, sizeof(g_suc_port), MSG_WAITALL) != sizeof(g_suc_port)) {
+            close(soc);
+            close(g_srv_sock);
+            g_srv_sock = -1;
+            free(g_srd_dir);
+            g_srd_dir = NULL;
+            return -1;
+        }
+
+        close(soc);
+
+        // g_suc_ip = suc_ip;
+        // g_suc_port = suc_port;
+    }
+
+    // crea el thread de servicio
     if (create_thread(server_thread, (void *)(long)g_srv_sock) != 0) {
-        close(g_srv_sock); g_srv_sock = -1;
-        free(g_srd_dir); g_srd_dir = NULL;
+        close(g_srv_sock);
+        g_srv_sock = -1;
+        free(g_srd_dir);
+        g_srd_dir = NULL;
         return -1;
     }
     return 0;
@@ -98,20 +166,78 @@ int ring_remote_pid(unsigned int remote_ip, unsigned short remote_port) {
 // retorna 0 si OK y -1 si error
 int ring_successor(unsigned int *ip, unsigned short *port) {
     if (!is_initialized()) return -1; // no está inicializada
+    if (!ip || !port) return -1;
+    *ip = g_suc_ip;
+    *port = g_suc_port;
     return 0;
 }
+
+
 // devuelve la IP y el puerto del nodo sucesor del especificado;
 // retorna 0 si OK y -1 si error
 int ring_remote_successor(unsigned int remote_ip, unsigned short remote_port, unsigned int *suc_ip, unsigned short *suc_port) {
+    int soc;
+    char op;
+
     if (!is_initialized()) return -1; // no está inicializada
+    if (!suc_ip || !suc_port) return -1; // parámetros no válidos
+
+    soc = create_socket_cln(remote_ip, remote_port);
+    if (soc < 0) return -1;
+
+    op = 'R';
+    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+        close(soc);
+        return -1;
+    }
+
+    if (recv(soc, suc_ip, sizeof(*suc_ip), MSG_WAITALL) != sizeof(*suc_ip)) {
+        close(soc);
+        return -1;
+    }
+
+    if (recv(soc, suc_port, sizeof(*suc_port), MSG_WAITALL) != sizeof(*suc_port)) {
+        close(soc);
+        return -1;
+    }
+
+    close(soc);
     return 0;
 }
+
+
 // devuelve la IP y el puerto del nodo sucesor del sucesor del especificado;
 // retorna 0 si OK y -1 si error
 int ring_remote_successor_successor(unsigned int remote_ip, unsigned short remote_port, unsigned int *suc_suc_ip, unsigned short *suc_suc_port) {
+    int soc;
+    char op;
+
     if (!is_initialized()) return -1; // no está inicializada
+
+    soc = create_socket_cln(remote_ip, remote_port);
+    if (soc < 0) return -1;
+
+    op = 'U';
+    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+        close(soc);
+        return -1;
+    }
+
+    if (recv(soc, suc_suc_ip, sizeof(*suc_suc_ip), MSG_WAITALL) != sizeof(*suc_suc_ip)) {
+        close(soc);
+        return -1;
+    }
+
+    if (recv(soc, suc_suc_port, sizeof(*suc_suc_port), MSG_WAITALL) != sizeof(*suc_suc_port)) {
+        close(soc);
+        return -1;
+    }
+
+    close(soc);
     return 0;
 }
+
+
 // descarga el fichero del nodo especificado;
 // retorna el tamaño del fichero si OK y -1 en caso de error
 int ring_download(unsigned int remote_ip, unsigned short remote_port, const char *filename) {
