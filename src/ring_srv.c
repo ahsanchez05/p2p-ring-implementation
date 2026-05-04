@@ -11,6 +11,12 @@
 //#include <sys/sendfile.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <errno.h>
+#include <limits.h>
+#ifdef __linux__
+#include <sys/sendfile.h>
+#endif
+
 #include "ring.h"
 #include "common.h"
 
@@ -124,6 +130,100 @@ void *request_handler(void *arg) {
             break;
         }
 
+        case 'D': {
+            // Descarga solicitada por el cliente
+            uint32_t filename_len_net;
+            if (recv(soc, &filename_len_net, sizeof(filename_len_net), MSG_WAITALL) != sizeof(filename_len_net)) {
+                close(soc);
+                return NULL;
+            }
+
+            uint32_t filename_len = ntohl(filename_len_net);
+            if (filename_len == 0 || filename_len > PATH_MAX) {
+                close(soc);
+                return NULL;
+            }
+
+            char *file_name = (char *)malloc(filename_len + 1);
+            if (!file_name) {
+                close(soc);
+                return NULL;
+            }
+            if (recv(soc, file_name, filename_len, MSG_WAITALL) != filename_len) {
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+            file_name[filename_len] = '\0'; // Asegurar terminación de cadena
+
+            // construir ruta completa del fichero
+            char path[PATH_MAX];
+            if (snprintf(path, sizeof(path), "%s/%s", g_srd_dir ? g_srd_dir : ".", file_name) >= (int)sizeof(path)) {
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+
+            // abrir fichero
+            int fd = open(path, O_RDONLY);
+            if (fd < 0) {
+                int32_t err = htonl(-1);
+                send(soc, &err, sizeof(err), 0);
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+
+            struct stat st;
+            if (fstat(fd, &st) < 0) {
+                close(fd);
+                int32_t err = htonl(-1);
+                send(soc, &err, sizeof(err), 0);
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+            off_t file_size = st.st_size;
+            if (file_size < 0) file_size = 0;
+
+            uint32_t fsize32 = (uint32_t)file_size;
+            uint32_t fsize32_net = htonl(fsize32);
+            if (send(soc, &fsize32_net, sizeof(fsize32_net), 0) != sizeof(fsize32_net)) {
+                close(fd);
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+
+            // Envío del fichero con sendfile (zerocopy)
+            off_t offset = 0;
+            while (offset < (off_t)fsize32) {
+                ssize_t sent = sendfile(soc, fd, &offset, (size_t)((off_t)fsize32 - offset)); // solo válido en linux (no compila en macOS)
+                if (sent > 0) {
+                    continue;
+                }
+                if (sent == 0) {
+                    break; // EOF
+                }
+                if (errno == EINTR) {
+                    continue; // reintentar si se interrumpe
+                }
+                // error
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // socket no listo para enviar, esperar un poco y reintentar
+                    usleep(1000); // esperar 1ms antes de reintentar
+                    continue;
+                }
+                close(fd);
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+            close(fd);
+            free(file_name);
+            close(soc);
+            return NULL;
+        }
         default:
             break;
     }

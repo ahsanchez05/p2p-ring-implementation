@@ -11,6 +11,8 @@
 #include <sys/uio.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <limits.h>
+#include <stdint.h>
 
 #include "ring.h"
 #include "common.h"
@@ -242,8 +244,102 @@ int ring_remote_successor_successor(unsigned int remote_ip, unsigned short remot
 // retorna el tamaño del fichero si OK y -1 en caso de error
 int ring_download(unsigned int remote_ip, unsigned short remote_port, const char *filename) {
     if (!is_initialized()) return -1; // no está inicializada
-    return 0;
+    if (!filename) return -1;
+
+    int soc = create_socket_cln(remote_ip, remote_port);
+    if (soc < 0) return -1;
+
+    char op = 'D';
+    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+        close(soc);
+        return -1;
+    }
+
+    // enviar longitud del nombre del fichero
+    uint32_t filename_len_host = (uint32_t)strlen(filename);
+    uint32_t filename_len_net = htonl(filename_len_host);
+    if (send(soc, &filename_len_net, sizeof(filename_len_net), 0) != sizeof(filename_len_net)) {
+        close(soc);
+        return -1;
+    }
+
+    // enviar nombre del fichero
+    size_t sent_total = 0;
+    while (sent_total < filename_len_host) {
+        ssize_t sent = send(soc, filename + sent_total, filename_len_host - sent_total, 0);
+        if (sent <= 0) {
+            close(soc);
+            return -1;
+        }
+        sent_total += sent;
+    }
+
+    // recibir tamaño del fichero
+    uint32_t file_size_net;
+    if (recv(soc, &file_size_net, sizeof(file_size_net), MSG_WAITALL) != sizeof(file_size_net)) {
+        close(soc);
+        return -1;
+    }
+
+    int32_t file_size = (int32_t)ntohl(file_size_net);
+    if (file_size < 0) {
+        close(soc);
+        return -1;
+    }
+
+
+    // crear fichero destino en g_srd_dir
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", g_srd_dir ? g_srd_dir : ".", filename) >= (int)sizeof(path)) {
+        close(soc);
+        return -1; // ruta demasiado larga
+    }
+
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        close(soc);
+        return -1;
+    }
+
+    // ajustar tamaño y mapear
+    if (file_size > 0) {
+        if (ftruncate(fd, file_size) < 0) {
+            close(fd);
+            close(soc);
+            return -1;
+        }
+
+        void *map = mmap(NULL, file_size, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) {
+            close(fd);
+            close(soc);
+            return -1;
+        }
+
+        // recibir datos del fichero
+        size_t received_total = 0;
+        while (received_total < file_size) {
+            ssize_t received = recv(soc, (char*)map + received_total, file_size - received_total, 0);
+            if (received <= 0) {
+                munmap(map, file_size);
+                close(fd);
+                close(soc);
+                return -1;
+            }
+            received_total += received;
+        }
+        // sincroniza y libera la región mapeada
+        msync(map, file_size, MS_SYNC);
+        munmap(map, file_size);
+    } else {
+        // si el fichero está vacío, no se hace nada
+    }
+    close(fd);
+    close(soc);
+    return (int)file_size;
 }
+
+
 // busca el fichero en el anillo dando un número máximo de saltos y devolviendo
 // la IP y el puerto del nodo que lo contiene;
 // retorna 0 si OK y -1 si error
