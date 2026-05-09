@@ -214,6 +214,7 @@ void *request_handler(void *arg) {
                     usleep(1000); // esperar 1ms antes de reintentar
                     continue;
                 }
+                // error
                 close(fd);
                 free(file_name);
                 close(soc);
@@ -223,6 +224,94 @@ void *request_handler(void *arg) {
             free(file_name);
             close(soc);
             return NULL;
+        }
+
+        case 'L': {
+            // buscar fichero en el anillo
+
+            // recibir longitud del fichero
+            uint32_t filename_len_net;
+            if (recv(soc, &filename_len_net, sizeof(filename_len_net), MSG_WAITALL) != sizeof(filename_len_net)) {
+                close(soc);
+                return NULL;
+            }
+            uint32_t filename_len = ntohl(filename_len_net);
+
+            if (filename_len == 0 || filename_len > PATH_MAX) {
+                close(soc);
+                return NULL;
+            }
+
+            // recibir nombre del fichero
+            char *file_name = (char *)malloc(filename_len + 1);
+            if (!file_name) {
+                close(soc);
+                return NULL;
+            }
+
+            if (recv(soc, file_name, filename_len, MSG_WAITALL) != filename_len) {
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+            file_name[filename_len] = '\0';
+
+            // recibir hops
+            uint32_t hops_net;
+            if (recv(soc, &hops_net, sizeof(hops_net), MSG_WAITALL) != sizeof(hops_net)) {
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+            uint32_t hops = ntohl(hops_net);
+
+
+            // construir ruta completa del fichero
+            char path[PATH_MAX];
+            if (snprintf(path, sizeof(path), "%s/%s", g_srd_dir ? g_srd_dir : ".", file_name) >= (int)sizeof(path)) {
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+
+            // buscar fichero localmente
+            struct stat st;
+            int found_locally = (stat(path, &st) == 0) ? 1 : 0;
+
+            unsigned int resp_ip;
+            unsigned short resp_port;
+
+            if (found_locally) {
+                // encontrado localmente: devolver IP/puerto
+                resp_ip = g_local_ip;
+                resp_port = g_local_port;
+            } else if (hops == 0) {
+                // no encontrado y no quedan hops: devolver error (-1)
+                resp_ip = (unsigned int)(-1);
+                resp_port = 0;
+            } else {
+                // no encontrado pero quedan hops: reenviar petición al sucesor
+                if (ring_lookup(file_name, (int)hops, &resp_ip, &resp_port) < 0) {
+                    resp_ip = (unsigned int)(-1);
+                    resp_port = 0;
+                }
+            }
+
+            // enviar respuesta (IP/port ya están en formato de red)
+            uint32_t resp_ip_net = resp_ip;
+            uint16_t resp_port_net = resp_port;
+            if (send(soc, &resp_ip_net, sizeof(resp_ip_net), 0) != sizeof(resp_ip_net)) {
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+            if (send(soc, &resp_port_net, sizeof(resp_port_net), 0) != sizeof(resp_port_net)) {
+                free(file_name);
+                close(soc);
+                return NULL;
+            }
+            free(file_name);
+            break;
         }
         default:
             break;
