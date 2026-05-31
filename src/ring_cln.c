@@ -73,9 +73,9 @@ int ring_init(const char *shrd_dir, unsigned int local_ip, unsigned int remote_i
             return -1; // error en conexión
         }
 
-        // manda código de alta
+        // manda código de alta y puerto en dos operaciones pero usando MSG_MORE
         op = 'A';
-        if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+        if (send(soc, &op, sizeof(char), MSG_MORE) != sizeof(char)) {
             close(soc);
             close(g_srv_sock);
             g_srv_sock = -1;
@@ -145,6 +145,7 @@ int ring_self(unsigned int *ip, unsigned short *port) {
 int ring_remote_pid(unsigned int remote_ip, unsigned short remote_port) {
     if (!is_initialized()) return -1; // no está inicializada
 
+    // Crea socket cliente
     int soc = create_socket_cln(remote_ip, remote_port);
     if (soc < 0) return -1; // error en conexión
 
@@ -184,20 +185,23 @@ int ring_remote_successor(unsigned int remote_ip, unsigned short remote_port, un
     if (!is_initialized()) return -1; // no está inicializada
     if (!suc_ip || !suc_port) return -1; // parámetros no válidos
 
+    // Crear socket cliente
     soc = create_socket_cln(remote_ip, remote_port);
     if (soc < 0) return -1;
 
     op = 'R';
-    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {  // Mandar operacion
         close(soc);
         return -1;
     }
 
+    // Recibir ip del sucesor
     if (recv(soc, suc_ip, sizeof(*suc_ip), MSG_WAITALL) != sizeof(*suc_ip)) {
         close(soc);
         return -1;
     }
 
+    // Recibir puerto del sucesor
     if (recv(soc, suc_port, sizeof(*suc_port), MSG_WAITALL) != sizeof(*suc_port)) {
         close(soc);
         return -1;
@@ -216,20 +220,23 @@ int ring_remote_successor_successor(unsigned int remote_ip, unsigned short remot
 
     if (!is_initialized()) return -1; // no está inicializada
 
+    // Crear socket cliente
     soc = create_socket_cln(remote_ip, remote_port);
     if (soc < 0) return -1;
 
     op = 'U';
-    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {  // Mandar operacion
         close(soc);
         return -1;
     }
 
+    // Recibir ip del sucesor del sucesor
     if (recv(soc, suc_suc_ip, sizeof(*suc_suc_ip), MSG_WAITALL) != sizeof(*suc_suc_ip)) {
         close(soc);
         return -1;
     }
 
+    // Recibir puerto del sucesor del sucesor
     if (recv(soc, suc_suc_port, sizeof(*suc_suc_port), MSG_WAITALL) != sizeof(*suc_suc_port)) {
         close(soc);
         return -1;
@@ -246,32 +253,29 @@ int ring_download(unsigned int remote_ip, unsigned short remote_port, const char
     if (!is_initialized()) return -1; // no está inicializada
     if (!filename) return -1;
 
+    // Crear socket cliente
     int soc = create_socket_cln(remote_ip, remote_port);
     if (soc < 0) return -1;
 
+    // Mandar operacion (descarga)
     char op = 'D';
-    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+    if (send(soc, &op, sizeof(char), MSG_MORE) != sizeof(char)) {
         close(soc);
         return -1;
     }
 
-    // enviar longitud del nombre del fichero
+    // enviar longitud del nombre del fichero (en formato de red)
     uint32_t filename_len_host = (uint32_t)strlen(filename);
     uint32_t filename_len_net = htonl(filename_len_host);
-    if (send(soc, &filename_len_net, sizeof(filename_len_net), 0) != sizeof(filename_len_net)) {
+    if (send(soc, &filename_len_net, sizeof(filename_len_net), MSG_MORE) != sizeof(filename_len_net)) {
         close(soc);
         return -1;
     }
 
-    // enviar nombre del fichero
-    size_t sent_total = 0;
-    while (sent_total < filename_len_host) {
-        ssize_t sent = send(soc, filename + sent_total, filename_len_host - sent_total, 0);
-        if (sent <= 0) {
-            close(soc);
-            return -1;
-        }
-        sent_total += sent;
+    // enviar nombre del fichero en un único envío
+    if (send(soc, filename, filename_len_host, 0) != (ssize_t)filename_len_host) {
+        close(soc);
+        return -1;
     }
 
     // recibir tamaño del fichero
@@ -281,6 +285,7 @@ int ring_download(unsigned int remote_ip, unsigned short remote_port, const char
         return -1;
     }
 
+    // Convertir tamaño del fichero de red a host
     int32_t file_size = (int32_t)ntohl(file_size_net);
     if (file_size < 0) {
         close(soc);
@@ -288,27 +293,30 @@ int ring_download(unsigned int remote_ip, unsigned short remote_port, const char
     }
 
 
-    // crear fichero destino en g_srd_dir
+    // crear fichero destino en g_srd_dir (directorio del nodo que solicita la descarga)
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s", g_srd_dir ? g_srd_dir : ".", filename) >= (int)sizeof(path)) {
         close(soc);
         return -1; // ruta demasiado larga
     }
 
+    // abrir fichero
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {
         close(soc);
         return -1;
     }
 
-    // ajustar tamaño y mapear
+    // ajustar tamaño del fichero y mapear en memoria compartida
     if (file_size > 0) {
+        // Ajustar tamaño del fichero de acuerdo con file_size
         if (ftruncate(fd, file_size) < 0) {
             close(fd);
             close(soc);
             return -1;
         }
 
+        // Mapear fichero a memoria compartida para poder leer/escribir
         void *map = mmap(NULL, file_size, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
         if (map == MAP_FAILED) {
             close(fd);
@@ -316,7 +324,7 @@ int ring_download(unsigned int remote_ip, unsigned short remote_port, const char
             return -1;
         }
 
-        // recibir datos del fichero
+        // recibir datos del fichero desde el servidor hasta el directorio destino
         size_t received_total = 0;
         while (received_total < file_size) {
             ssize_t received = recv(soc, (char*)map + received_total, file_size - received_total, 0);
@@ -347,18 +355,16 @@ int ring_lookup(const char *filename, int hops, unsigned int *ip, unsigned short
     if (!is_initialized()) return -1; // no está inicializada
     if (!filename || !ip || !port || hops < 0) return -1;
 
-    // Primero, comprobar localmente siempre (el nodo local cuenta como visitado)
-    {
-        char path_local[PATH_MAX];
-        struct stat st_local;
-        if (snprintf(path_local, sizeof(path_local), "%s/%s", g_srd_dir ? g_srd_dir : ".", filename) >= (int)sizeof(path_local)) {
-            return -1;
-        }
-        if (stat(path_local, &st_local) == 0) {
-            *ip = g_local_ip;
-            *port = g_local_port;
-            return 0;
-        }
+    // Primero, comprobar si el fichero existe en el nodo local (el nodo local cuenta como visitado)
+    char path_local[PATH_MAX];
+    struct stat st_local;
+    if (snprintf(path_local, sizeof(path_local), "%s/%s", g_srd_dir ? g_srd_dir : ".", filename) >= (int)sizeof(path_local)) {
+        return -1;
+    }
+    if (stat(path_local, &st_local) == 0) {
+        *ip = g_local_ip;
+        *port = g_local_port;
+        return 0;
     }
 
     // si no está local y no quedan hops permitidos, error
@@ -366,11 +372,13 @@ int ring_lookup(const char *filename, int hops, unsigned int *ip, unsigned short
         return -1;
     }
 
+    // Crear socket cliente
     int soc = create_socket_cln(g_suc_ip, g_suc_port);
     if (soc < 0) return -1;
 
+    // Mandar operacion lookup
     char op = 'L';
-    if (send(soc, &op, sizeof(char), 0) != sizeof(char)) {
+    if (send(soc, &op, sizeof(char), MSG_MORE) != sizeof(char)) {
         close(soc);
         return -1;
     }
@@ -378,24 +386,20 @@ int ring_lookup(const char *filename, int hops, unsigned int *ip, unsigned short
     // enviar longitud del fichero
     uint32_t filename_len_host = (uint32_t)strlen(filename);
     uint32_t filename_len_net = htonl(filename_len_host);
-    if (send(soc, &filename_len_net, sizeof(filename_len_net), 0) != sizeof(filename_len_net)) {
+    if (send(soc, &filename_len_net, sizeof(filename_len_net), MSG_MORE) != sizeof(filename_len_net)) {
         close(soc);
         return -1;
     }
 
-    // enviar nombre del fichero
-    size_t sent_total = 0;
-    while (sent_total < filename_len_host) {
-        ssize_t sent = send(soc, filename + sent_total, filename_len_host - sent_total, 0);
-        if (sent <= 0) {
-            close(soc);
-            return -1;
-        }
-        sent_total += sent;
+    // enviar nombre del fichero en un único envío y cerrar el mensaje con hops
+    if (send(soc, filename, filename_len_host, MSG_MORE) != (ssize_t)filename_len_host) {
+        close(soc);
+        return -1;
     }
 
     // enviar hops
-    // el nodo local cuenta como visitado; al pedir al sucesor restamos 1
+    // el nodo local cuenta como visitado
+    // al pedir al sucesor restamos 1
     uint32_t hops_forward = (uint32_t)(hops - 1);
     uint32_t hops_net = htonl(hops_forward);
     if (send(soc, &hops_net, sizeof(hops_net), 0) != sizeof(hops_net)) {
@@ -430,8 +434,9 @@ int ring_lookup(const char *filename, int hops, unsigned int *ip, unsigned short
 }
 
 
-// busca y descarga el fichero del nodo encontrado en el anillo que lo contiene
-// retorna el tamaño del fichero si OK y -1 en caso de error
+// busca y descarga el fichero del nodo encontrado en el anillo que lo contiene;
+// retorna el tamaño del fichero si OK y -1 en caso de error;
+// ESTA FUNCIÓN YA ESTA COMPLETADA
 int ring_get_file(const char *filename, int hops) {
     if (!is_initialized()) return -1; // no está inicializada
     unsigned int ip, ip_local;

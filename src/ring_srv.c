@@ -2,21 +2,18 @@
 #include <stdio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <sys/uio.h>
 #include <sys/stat.h>
-//#include <sys/sendfile.h>
+#include <sys/sendfile.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <errno.h>
 #include <limits.h>
-#ifdef __linux__
-#include <sys/sendfile.h>
-#endif
-
 #include "ring.h"
 #include "common.h"
 
@@ -29,6 +26,8 @@ extern unsigned short g_local_port;
 extern int g_srv_sock;
 extern char *g_srd_dir;
 
+
+// Manejador de solicitudes que procesa operaciones del cliente
 void *request_handler(void *arg) {
     int soc = (int)(intptr_t)arg;
     char op;
@@ -77,8 +76,8 @@ void *request_handler(void *arg) {
             g_suc_ip = clnt_ip;
             g_suc_port = clnt_port;
 
-            // responder con el sucesor anterior
-            if (send(soc, &old_ip, sizeof(old_ip), 0) != sizeof(old_ip)) {
+            // responder con el sucesor anterior (envío en dos pasos usando MSG_MORE)
+            if (send(soc, &old_ip, sizeof(old_ip), MSG_MORE) != sizeof(old_ip)) {
                 close(soc);
                 return NULL;
             }
@@ -91,7 +90,7 @@ void *request_handler(void *arg) {
 
         case 'R': {
             // obtener sucesor
-            if (send(soc, &g_suc_ip, sizeof(g_suc_ip), 0) != sizeof(g_suc_ip)) {
+            if (send(soc, &g_suc_ip, sizeof(g_suc_ip), MSG_MORE) != sizeof(g_suc_ip)) {
                 close(soc);
                 return NULL;
             }
@@ -119,7 +118,7 @@ void *request_handler(void *arg) {
                 }
             }
 
-            if (send(soc, &suc_ip, sizeof(suc_ip), 0) != sizeof(suc_ip)) {
+            if (send(soc, &suc_ip, sizeof(suc_ip), MSG_MORE) != sizeof(suc_ip)) {
                 close(soc);
                 return NULL;
             }
@@ -133,11 +132,14 @@ void *request_handler(void *arg) {
         case 'D': {
             // Descarga solicitada por el cliente
             uint32_t filename_len_net;
+
+            // Recibir tamaño del fichero
             if (recv(soc, &filename_len_net, sizeof(filename_len_net), MSG_WAITALL) != sizeof(filename_len_net)) {
                 close(soc);
                 return NULL;
             }
 
+            // Pasar longitud de fichero a formato de host
             uint32_t filename_len = ntohl(filename_len_net);
             if (filename_len == 0 || filename_len > PATH_MAX) {
                 close(soc);
@@ -149,6 +151,8 @@ void *request_handler(void *arg) {
                 close(soc);
                 return NULL;
             }
+
+            // Recibir nombre del fichero
             if (recv(soc, file_name, filename_len, MSG_WAITALL) != filename_len) {
                 free(file_name);
                 close(soc);
@@ -174,6 +178,8 @@ void *request_handler(void *arg) {
                 return NULL;
             }
 
+
+            // fstat para obtener metadatos del fichero
             struct stat st;
             if (fstat(fd, &st) < 0) {
                 close(fd);
@@ -183,12 +189,15 @@ void *request_handler(void *arg) {
                 close(soc);
                 return NULL;
             }
+
             off_t file_size = st.st_size;
             if (file_size < 0) file_size = 0;
 
             uint32_t fsize32 = (uint32_t)file_size;
             uint32_t fsize32_net = htonl(fsize32);
-            if (send(soc, &fsize32_net, sizeof(fsize32_net), 0) != sizeof(fsize32_net)) {
+
+            // Envia el tamaño del fichero
+            if (send(soc, &fsize32_net, sizeof(fsize32_net), MSG_MORE) != sizeof(fsize32_net)) {
                 close(fd);
                 free(file_name);
                 close(soc);
@@ -198,7 +207,7 @@ void *request_handler(void *arg) {
             // Envío del fichero con sendfile (zerocopy)
             off_t offset = 0;
             while (offset < (off_t)fsize32) {
-                ssize_t sent = sendfile(soc, fd, &offset, (size_t)((off_t)fsize32 - offset)); // solo válido en linux (no compila en macOS)
+                ssize_t sent = sendfile(soc, fd, &offset, (size_t)((off_t)fsize32 - offset)); // solo compila en linux
                 if (sent > 0) {
                     continue;
                 }
@@ -235,8 +244,9 @@ void *request_handler(void *arg) {
                 close(soc);
                 return NULL;
             }
-            uint32_t filename_len = ntohl(filename_len_net);
 
+            // Pasar filename_len a formato de host
+            uint32_t filename_len = ntohl(filename_len_net);
             if (filename_len == 0 || filename_len > PATH_MAX) {
                 close(soc);
                 return NULL;
@@ -254,15 +264,18 @@ void *request_handler(void *arg) {
                 close(soc);
                 return NULL;
             }
-            file_name[filename_len] = '\0';
+            file_name[filename_len] = '\0'; // Asegurar terminación de cadena
 
             // recibir hops
+            // si no quedan, se mandara ip = -1 y puerto 0
+            // pero no se cierra la conexion
             uint32_t hops_net;
             if (recv(soc, &hops_net, sizeof(hops_net), MSG_WAITALL) != sizeof(hops_net)) {
                 free(file_name);
                 close(soc);
                 return NULL;
             }
+
             uint32_t hops = ntohl(hops_net);
 
 
@@ -300,7 +313,7 @@ void *request_handler(void *arg) {
             // enviar respuesta (IP/port ya están en formato de red)
             uint32_t resp_ip_net = resp_ip;
             uint16_t resp_port_net = resp_port;
-            if (send(soc, &resp_ip_net, sizeof(resp_ip_net), 0) != sizeof(resp_ip_net)) {
+            if (send(soc, &resp_ip_net, sizeof(resp_ip_net), MSG_MORE) != sizeof(resp_ip_net)) {
                 free(file_name);
                 close(soc);
                 return NULL;
