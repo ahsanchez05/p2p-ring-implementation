@@ -2,6 +2,9 @@
 
 Distributed P2P ring-based file sharing system with linear search, node management, and TCP-based communication, written in C.
 
+<p align="center">
+  <img src="images/P2P-ring.png" alt="P2P Ring">
+</p>
 
 ## Key features
 - Ring topology (each node stores its successor; an n-node network forms a logical ring)
@@ -92,4 +95,3 @@ Once running the interactive menu lets you perform operations such as:
 - U — successor of a node's successor
 - D — download a file directly from a remote node
 - L — lookup a filename across the ring with a hop limit
-- G — lookup + download (convenience)
