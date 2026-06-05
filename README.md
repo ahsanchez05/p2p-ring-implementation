@@ -95,3 +95,4 @@ Once running the interactive menu lets you perform operations such as:
 - U — successor of a node's successor
 - D — download a file directly from a remote node
 - L — lookup a filename across the ring with a hop limit
+- G - lookup and download a file across the ring with a hop limit
